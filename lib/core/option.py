@@ -9,6 +9,7 @@ import cookielib
 import glob
 import inspect
 import logging
+import httplib
 import os
 import random
 import re
@@ -53,7 +54,6 @@ from lib.core.common import readInput
 from lib.core.common import resetCookieJar
 from lib.core.common import runningAsAdmin
 from lib.core.common import safeExpandUser
-from lib.core.common import sanitizeStr
 from lib.core.common import setOptimize
 from lib.core.common import setPaths
 from lib.core.common import singleTimeWarnMessage
@@ -107,6 +107,7 @@ from lib.core.settings import DEFAULT_PAGE_ENCODING
 from lib.core.settings import DEFAULT_TOR_HTTP_PORTS
 from lib.core.settings import DEFAULT_TOR_SOCKS_PORT
 from lib.core.settings import DUMMY_URL
+from lib.core.settings import IGNORE_SAVE_OPTIONS
 from lib.core.settings import INJECT_HERE_MARK
 from lib.core.settings import IS_WIN
 from lib.core.settings import KB_CHARS_BOUNDARY_CHAR
@@ -289,7 +290,7 @@ def _feedTargetsDict(reqFile, addedTargetUrls):
                 line = line.strip('\r')
                 match = re.search(r"\A(%s) (.+) HTTP/[\d.]+\Z" % "|".join(getPublicTypeMembers(HTTPMETHOD, True)), line) if not method else None
 
-                if len(line) == 0 and method and method != HTTPMETHOD.GET and data is None:
+                if len(line.strip()) == 0 and method and method != HTTPMETHOD.GET and data is None:
                     data = ""
                     params = True
 
@@ -313,6 +314,7 @@ def _feedTargetsDict(reqFile, addedTargetUrls):
                 # Headers
                 elif re.search(r"\A\S+: ", line):
                     key, value = line.split(": ", 1)
+                    value = value.replace("\r", "").replace("\n", "")
 
                     # Cookie and Host headers
                     if key.upper() == HTTP_HEADER.COOKIE.upper():
@@ -766,8 +768,14 @@ def _setMetasploit():
 
     if conf.msfPath:
         for path in (conf.msfPath, os.path.join(conf.msfPath, "bin")):
-            if all(os.path.exists(normalizePath(os.path.join(path, _))) for _ in ("", "msfcli", "msfconsole", "msfencode", "msfpayload")):
+            if any(os.path.exists(normalizePath(os.path.join(path, _))) for _ in ("msfcli", "msfconsole")):
                 msfEnvPathExists = True
+                if all(os.path.exists(normalizePath(os.path.join(path, _))) for _ in ("msfvenom",)):
+                    kb.oldMsf = False
+                elif all(os.path.exists(normalizePath(os.path.join(path, _))) for _ in ("msfencode", "msfpayload")):
+                    kb.oldMsf = True
+                else:
+                    msfEnvPathExists = False
                 conf.msfPath = path
                 break
 
@@ -798,15 +806,23 @@ def _setMetasploit():
         for envPath in envPaths:
             envPath = envPath.replace(";", "")
 
-            if all(os.path.exists(normalizePath(os.path.join(envPath, _))) for _ in ("", "msfcli", "msfconsole", "msfencode", "msfpayload")):
-                infoMsg = "Metasploit Framework has been found "
-                infoMsg += "installed in the '%s' path" % envPath
-                logger.info(infoMsg)
-
+            if all(os.path.exists(normalizePath(os.path.join(envPath, _))) for _ in ("", "msfcli", "msfconsole")):
                 msfEnvPathExists = True
-                conf.msfPath = envPath
+                if all(os.path.exists(normalizePath(os.path.join(envPath, _))) for _ in ("msfvenom",)):
+                    kb.oldMsf = False
+                elif all(os.path.exists(normalizePath(os.path.join(envPath, _))) for _ in ("msfencode", "msfpayload")):
+                    kb.oldMsf = True
+                else:
+                    msfEnvPathExists = False
 
-                break
+                if msfEnvPathExists:
+                    infoMsg = "Metasploit Framework has been found "
+                    infoMsg += "installed in the '%s' path" % envPath
+                    logger.info(infoMsg)
+
+                    conf.msfPath = envPath
+
+                    break
 
     if not msfEnvPathExists:
         errMsg = "unable to locate Metasploit Framework installation. "
@@ -1136,21 +1152,63 @@ def _setHTTPProxy():
 
     proxyHandler.__init__(proxyHandler.proxies)
 
-def _setSafeUrl():
+def _setSafeVisit():
     """
-    Check and set the safe URL options.
+    Check and set the safe visit options.
     """
-    if not conf.safeUrl:
+    if not any ((conf.safeUrl, conf.safeReqFile)):
         return
 
-    if not re.search("^http[s]*://", conf.safeUrl):
-        if ":443/" in conf.safeUrl:
-            conf.safeUrl = "https://" + conf.safeUrl
+    if conf.safeReqFile:
+        checkFile(conf.safeReqFile)
+
+        raw = readCachedFileContent(conf.safeReqFile)
+        match = re.search(r"\A([A-Z]+) ([^ ]+) HTTP/[0-9.]+\Z", raw[:raw.find('\n')])
+
+        if match:
+            kb.safeReq.method = match.group(1)
+            kb.safeReq.url = match.group(2)
+            kb.safeReq.headers = {}
+
+            for line in raw[raw.find('\n') + 1:].split('\n'):
+                line = line.strip()
+                if line and ':' in line:
+                    key, value = line.split(':', 1)
+                    value = value.strip()
+                    kb.safeReq.headers[key] = value
+                    if key == HTTP_HEADER.HOST:
+                        if not value.startswith("http"):
+                            scheme = "http"
+                            if value.endswith(":443"):
+                                scheme = "https"
+                            value = "%s://%s" % (scheme, value)
+                        kb.safeReq.url = urlparse.urljoin(value, kb.safeReq.url)
+                else:
+                    break
+
+            post = None
+
+            if '\r\n\r\n' in raw:
+                post = raw[raw.find('\r\n\r\n') + 4:]
+            elif '\n\n' in raw:
+                post = raw[raw.find('\n\n') + 2:]
+
+            if post and post.strip():
+                kb.safeReq.post = post
+            else:
+                kb.safeReq.post = None
         else:
-            conf.safeUrl = "http://" + conf.safeUrl
+            errMsg = "invalid format of a safe request file"
+            raise SqlmapSyntaxException, errMsg
+    else:
+        if not re.search("^http[s]*://", conf.safeUrl):
+            if ":443/" in conf.safeUrl:
+                conf.safeUrl = "https://" + conf.safeUrl
+            else:
+                conf.safeUrl = "http://" + conf.safeUrl
 
     if conf.safeFreq <= 0:
-        errMsg = "please provide a valid value (>0) for safe frequency (--safe-freq) while using safe URL feature"
+        errMsg = "please provide a valid value (>0) for safe frequency (--safe-freq) while using safe visit features"
         raise SqlmapSyntaxException(errMsg)
 
 def _setPrefixSuffix():
@@ -1283,6 +1341,9 @@ def _setHTTPExtraHeaders():
         conf.headers = conf.headers.split("\n") if "\n" in conf.headers else conf.headers.split("\\n")
 
         for headerValue in conf.headers:
+            if not headerValue.strip():
+                continue
+
             if headerValue.count(':') >= 1:
                 header, value = (_.lstrip() for _ in headerValue.split(":", 1))
 
@@ -1462,7 +1523,7 @@ def _createTemporaryDirectory():
             os.makedirs(tempfile.gettempdir())
     except IOError, ex:
         errMsg = "there has been a problem while accessing "
-        errMsg += "system's temporary directory location(s) ('%s'). Please " % ex
+        errMsg += "system's temporary directory location(s) ('%s'). Please " % ex.message
         errMsg += "make sure that there is enough disk space left. If problem persists, "
         errMsg += "try to set environment variable 'TEMP' to a location "
         errMsg += "writeable by the current user"
@@ -1627,6 +1688,13 @@ def _cleanupOptions():
     threadData = getCurrentThreadData()
     threadData.reset()
 
+def _dirtyPatches():
+    """
+    Place for "dirty" Python related patches
+    """
+
+    httplib._MAXLINE = 1 * 1024 * 1024  # to accept overly long result lines (e.g. SQLi results in HTTP header responses)
+
 def _purgeOutput():
     """
     Safely removes (purges) output directory.
@@ -1729,6 +1797,8 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.followSitemapRecursion = None
     kb.forcedDbms = None
     kb.forcePartialUnion = False
+    kb.forceWhere = None
+    kb.futileUnion = None
     kb.headersFp = {}
     kb.heuristicDbms = None
     kb.heuristicMode = False
@@ -1755,9 +1825,11 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.multiThreadMode = False
     kb.negativeLogic = False
     kb.nullConnection = None
+    kb.oldMsf = None
     kb.orderByColumns = None
     kb.originalCode = None
     kb.originalPage = None
+    kb.originalPageTime = None
     kb.originalTimeDelay = None
     kb.originalUrls = dict()
 
@@ -1791,8 +1863,10 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.responseTimes = []
     kb.resumeValues = True
     kb.safeCharEncode = False
+    kb.safeReq = AttribDict()
     kb.singleLogFlags = set()
     kb.reduceTests = None
+    kb.tlsSNI = None
     kb.stickyDBMS = False
     kb.stickyLevel = None
     kb.storeCrawlingChoice = None
@@ -1801,6 +1875,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.technique = None
     kb.tempDir = None
     kb.testMode = False
+    kb.testOnlyCustom = False
     kb.testQueryCount = 0
     kb.testType = None
     kb.threadContinue = True
@@ -1890,16 +1965,16 @@ def _useWizardInterface():
 
     dataToStdout("\nsqlmap is running, please wait..\n\n")
 
-def _saveCmdline():
+def _saveConfig():
     """
-    Saves the command line options on a sqlmap configuration INI file
+    Saves the command line options to a sqlmap configuration INI file
     Format.
     """
 
-    if not conf.saveCmdline:
+    if not conf.saveConfig:
         return
 
-    debugMsg = "saving command line options on a sqlmap configuration INI file"
+    debugMsg = "saving command line options to a sqlmap configuration INI file"
     logger.debug(debugMsg)
 
     config = UnicodeRawConfigParser()
@@ -1922,6 +1997,9 @@ def _saveCmdline():
             if datatype and isListLike(datatype):
                 datatype = datatype[0]
 
+            if option in IGNORE_SAVE_OPTIONS:
+                continue
+
             if value is None:
                 if datatype == OPTION_TYPE.BOOLEAN:
                     value = "False"
@@ -1938,16 +2016,16 @@ def _saveCmdline():
 
             config.set(family, option, value)
 
-    confFP = openFile(paths.SQLMAP_CONFIG, "wb")
+    confFP = openFile(conf.saveConfig, "wb")
 
     try:
         config.write(confFP)
     except IOError, ex:
         errMsg = "something went wrong while trying "
-        errMsg += "to write to the configuration INI file '%s' ('%s')" % (paths.SQLMAP_CONFIG, ex)
+        errMsg += "to write to the configuration file '%s' ('%s')" % (conf.saveConfig, ex)
         raise SqlmapSystemException(errMsg)
 
-    infoMsg = "saved command line options on '%s' configuration file" % paths.SQLMAP_CONFIG
+    infoMsg = "saved command line options to the configuration file '%s'" % conf.saveConfig
     logger.info(infoMsg)
 
 def setVerbosity():
@@ -1985,7 +2063,12 @@ def _mergeOptions(inputOptions, overrideOptions):
     """
 
     if inputOptions.pickledOptions:
-        inputOptions = base64unpickle(inputOptions.pickledOptions)
+        try:
+            inputOptions = base64unpickle(inputOptions.pickledOptions)
+        except Exception, ex:
+            errMsg = "provided invalid value '%s' for option '--pickled-options'" % inputOptions.pickledOptions
+            errMsg += " ('%s')" % ex.message if ex.message else ""
+            raise SqlmapSyntaxException(errMsg)
 
     if inputOptions.configFile:
         configFileParser(inputOptions.configFile)
@@ -2137,6 +2220,18 @@ def _setTorSocksProxySettings():
     socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5 if conf.torType == PROXY_TYPE.SOCKS5 else socks.PROXY_TYPE_SOCKS4, LOCALHOST, conf.torPort or DEFAULT_TOR_SOCKS_PORT)
     socks.wrapmodule(urllib2)
 
+def _checkWebSocket():
+    infoMsg = "checking for WebSocket"
+    logger.debug(infoMsg)
+
+    if conf.url and (conf.url.startswith("ws:/") or conf.url.startswith("wss:/")):
+        try:
+            from websocket import ABNF
+        except ImportError:
+            errMsg = "sqlmap requires third-party module 'websocket-client' "
+            errMsg += "in order to use WebSocket funcionality"
+            raise SqlmapMissingDependence(errMsg)
+
 def _checkTor():
     if not conf.checkTor:
         return
@@ -2261,6 +2356,18 @@ def _basicOptionValidation():
         errMsg = "option '--crawl-exclude' requires usage of switch '--crawl'"
         raise SqlmapSyntaxException(errMsg)
 
+    if conf.safePost and not conf.safeUrl:
+        errMsg = "option '--safe-post' requires usage of option '--safe-url'"
+        raise SqlmapSyntaxException(errMsg)
+
+    if conf.safeFreq and not any((conf.safeUrl, conf.safeReqFile)):
+        errMsg = "option '--safe-freq' requires usage of option '--safe-url' or '--safe-req'"
+        raise SqlmapSyntaxException(errMsg)
+
+    if conf.safeReqFile and any((conf.safeUrl, conf.safePost)):
+        errMsg = "option '--safe-req' is incompatible with option '--safe-url' and option '--safe-post'"
+        raise SqlmapSyntaxException(errMsg)
+
     if conf.csrfUrl and not conf.csrfToken:
         errMsg = "option '--csrf-url' requires usage of option '--csrf-token'"
         raise SqlmapSyntaxException(errMsg)
@@ -2378,9 +2485,10 @@ def init():
 
     _useWizardInterface()
     setVerbosity()
-    _saveCmdline()
+    _saveConfig()
     _setRequestFromFile()
     _cleanupOptions()
+    _dirtyPatches()
     _purgeOutput()
     _checkDependencies()
     _createTemporaryDirectory()
@@ -2394,6 +2502,7 @@ def init():
     _setWafFunctions()
     _setTrafficOutputFP()
     _resolveCrossReferences()
+    _checkWebSocket()
 
     parseTargetUrl()
     parseTargetDirect()
@@ -2408,7 +2517,7 @@ def init():
         _setHTTPAuthentication()
         _setHTTPProxy()
         _setDNSCache()
-        _setSafeUrl()
+        _setSafeVisit()
         _setGoogleDorking()
         _setBulkMultipleTargets()
         _setSitemapTargets()

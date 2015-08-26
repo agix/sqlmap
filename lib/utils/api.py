@@ -8,7 +8,6 @@ See the file 'doc/COPYING' for copying permission
 
 import logging
 import os
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -32,6 +31,7 @@ from lib.core.enums import PART_RUN_CONTENT_TYPES
 from lib.core.exception import SqlmapConnectionException
 from lib.core.log import LOGGER_HANDLER
 from lib.core.optiondict import optDict
+from lib.core.settings import IS_WIN
 from lib.core.subprocessng import Popen
 from thirdparty.bottle.bottle import error as return_error
 from thirdparty.bottle.bottle import get
@@ -77,10 +77,17 @@ class Database(object):
         self.connection.commit()
 
     def execute(self, statement, arguments=None):
-        if arguments:
-            self.cursor.execute(statement, arguments)
-        else:
-            self.cursor.execute(statement)
+        while True:
+            try:
+                if arguments:
+                    self.cursor.execute(statement, arguments)
+                else:
+                    self.cursor.execute(statement)
+            except sqlite3.OperationalError, ex:
+                if not "locked" in ex.message:
+                    raise
+            else:
+                break
 
         if statement.lstrip().upper().startswith("SELECT"):
             return self.cursor.fetchall()
@@ -148,11 +155,12 @@ class Task(object):
 
     def engine_start(self):
         self.process = Popen(["python", "sqlmap.py", "--pickled-options", base64pickle(self.options)],
-                             shell=False, stdin=PIPE, close_fds=False)
+                             shell=False, close_fds=not IS_WIN)
 
     def engine_stop(self):
         if self.process:
-            return self.process.terminate()
+            self.process.terminate()
+            return self.process.wait()
         else:
             return None
 
@@ -161,7 +169,8 @@ class Task(object):
 
     def engine_kill(self):
         if self.process:
-            return self.process.kill()
+            self.process.kill()
+            return self.process.wait()
         else:
             return None
 

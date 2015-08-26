@@ -43,6 +43,7 @@ from xml.dom import minidom
 from xml.sax import parse
 from xml.sax import SAXParseException
 
+from extra.beep.beep import beep
 from extra.cloak.cloak import decloak
 from extra.safe2bin.safe2bin import safecharencode
 from lib.core.bigarray import BigArray
@@ -97,7 +98,6 @@ from lib.core.settings import DBMS_DIRECTORY_DICT
 from lib.core.settings import DEFAULT_COOKIE_DELIMITER
 from lib.core.settings import DEFAULT_GET_POST_DELIMITER
 from lib.core.settings import DEFAULT_MSSQL_SCHEMA
-from lib.core.settings import DESCRIPTION
 from lib.core.settings import DUMMY_USER_INJECTION
 from lib.core.settings import DYNAMICITY_MARK_LENGTH
 from lib.core.settings import ERROR_PARSING_REGEXES
@@ -134,9 +134,7 @@ from lib.core.settings import REFLECTED_MAX_REGEX_PARTS
 from lib.core.settings import REFLECTED_REPLACEMENT_REGEX
 from lib.core.settings import REFLECTED_VALUE_MARKER
 from lib.core.settings import REFLECTIVE_MISS_THRESHOLD
-from lib.core.settings import REVISION
 from lib.core.settings import SENSITIVE_DATA_REGEX
-from lib.core.settings import SITE
 from lib.core.settings import SUPPORTED_DBMS
 from lib.core.settings import TEXT_TAG_REGEX
 from lib.core.settings import TIME_STDEV_COEFF
@@ -146,7 +144,6 @@ from lib.core.settings import URI_QUESTION_MARKER
 from lib.core.settings import URLENCODE_CHAR_LIMIT
 from lib.core.settings import URLENCODE_FAILSAFE_CHARS
 from lib.core.settings import USER_AGENT_ALIASES
-from lib.core.settings import VERSION
 from lib.core.settings import VERSION_STRING
 from lib.core.threads import getCurrentThreadData
 from lib.utils.sqlalchemy import _sqlalchemy
@@ -875,11 +872,11 @@ def dataToOutFile(filename, data):
         retVal = os.path.join(conf.filePath, filePathToSafeString(filename))
 
         try:
-            with openFile(retVal, "wb") as f:
+            with open(retVal, "w+b") as f:
                 f.write(data)
         except IOError, ex:
             errMsg = "something went wrong while trying to write "
-            errMsg += "to the output file ('%s')" % ex
+            errMsg += "to the output file ('%s')" % ex.message
             raise SqlmapGenericException(errMsg)
 
     return retVal
@@ -935,6 +932,10 @@ def readInput(message, default=None, checkBatch=True):
             retVal = default
         else:
             logging._acquireLock()
+
+            if conf.get("beep"):
+                beep()
+
             dataToStdout("\r%s" % message, forceOutput=True, bold=True)
             kb.prependFlag = False
 
@@ -1007,6 +1008,14 @@ def sanitizeStr(value):
 
     return getUnicode(value).replace("\n", " ").replace("\r", "")
 
+def getHeader(headers, key):
+    retVal = None
+    for _ in (headers or {}):
+        if _.upper() == key.upper():
+            retVal = headers[_]
+            break
+    return retVal
+
 def checkFile(filename):
     """
     Checks for file existence and readability
@@ -1019,7 +1028,7 @@ def checkFile(filename):
 
     if valid:
         try:
-            with open(filename, "rb") as f:
+            with open(filename, "rb"):
                 pass
         except:
             valid = False
@@ -1093,7 +1102,7 @@ def setPaths():
     paths.SQLMAP_XML_BANNER_PATH = os.path.join(paths.SQLMAP_XML_PATH, "banner")
     paths.SQLMAP_XML_PAYLOADS_PATH = os.path.join(paths.SQLMAP_XML_PATH, "payloads")
 
-    _ = os.path.join(os.path.expanduser("~"), ".sqlmap")
+    _ = os.path.join(os.path.expandvars(os.path.expanduser("~")), ".sqlmap")
     paths.SQLMAP_OUTPUT_PATH = getUnicode(paths.get("SQLMAP_OUTPUT_PATH", os.path.join(_, "output")), encoding=sys.getfilesystemencoding())
     paths.SQLMAP_DUMP_PATH = os.path.join(paths.SQLMAP_OUTPUT_PATH, "%s", "dump")
     paths.SQLMAP_FILES_PATH = os.path.join(paths.SQLMAP_OUTPUT_PATH, "%s", "files")
@@ -1103,7 +1112,6 @@ def setPaths():
     paths.SQL_SHELL_HISTORY = os.path.join(_, "sql.hst")
     paths.SQLMAP_SHELL_HISTORY = os.path.join(_, "sqlmap.hst")
     paths.GITHUB_HISTORY = os.path.join(_, "github.hst")
-    paths.SQLMAP_CONFIG = os.path.join(paths.SQLMAP_ROOT_PATH, "sqlmap-%s.conf" % randomStr())
     paths.COMMON_COLUMNS = os.path.join(paths.SQLMAP_TXT_PATH, "common-columns.txt")
     paths.COMMON_TABLES = os.path.join(paths.SQLMAP_TXT_PATH, "common-tables.txt")
     paths.COMMON_OUTPUTS = os.path.join(paths.SQLMAP_TXT_PATH, 'common-outputs.txt')
@@ -1248,7 +1256,8 @@ def parseTargetUrl():
         errMsg += "on this platform"
         raise SqlmapGenericException(errMsg)
 
-    if not re.search("^http[s]*://", conf.url, re.I):
+    if not re.search("^http[s]*://", conf.url, re.I) and \
+            not re.search("^ws[s]*://", conf.url, re.I):
         if ":443/" in conf.url:
             conf.url = "https://" + conf.url
         else:
@@ -1574,9 +1583,10 @@ def safeExpandUser(filepath):
 
     try:
         retVal = os.path.expanduser(filepath)
-    except UnicodeDecodeError:
+    except UnicodeError:
         _ = locale.getdefaultlocale()
-        retVal = getUnicode(os.path.expanduser(filepath.encode(_[1] if _ and len(_) > 1 else UNICODE_ENCODING)))
+        encoding = _[1] if _ and len(_) > 1 else UNICODE_ENCODING
+        retVal = getUnicode(os.path.expanduser(filepath.encode(encoding)), encoding=encoding)
 
     return retVal
 
@@ -2106,7 +2116,7 @@ def getUnicode(value, encoding=None, noneToNull=False):
     elif isinstance(value, basestring):
         while True:
             try:
-                return unicode(value, encoding or kb.get("pageEncoding") or UNICODE_ENCODING)
+                return unicode(value, encoding or (kb.get("pageEncoding") if kb.get("originalPage") else None) or UNICODE_ENCODING)
             except UnicodeDecodeError, ex:
                 try:
                     return unicode(value, UNICODE_ENCODING)
@@ -2271,7 +2281,8 @@ def findMultipartPostBoundary(post):
     candidates = []
 
     for match in re.finditer(r"(?m)^--(.+?)(--)?$", post or ""):
-        _ = match.group(1)
+        _ = match.group(1).strip().strip('-')
+
         if _ in done:
             continue
         else:
@@ -2472,7 +2483,11 @@ def extractTextTagContent(page):
     [u'Title', u'foobar']
     """
 
-    page = re.sub(r"(?si)[^\s>]*%s[^<]*" % REFLECTED_VALUE_MARKER, "", page or "")
+    page = page or ""
+
+    if REFLECTED_VALUE_MARKER in page:
+        page = re.sub(r"(?si)[^\s>]*%s[^\s<]*" % REFLECTED_VALUE_MARKER, "", page)
+
     return filter(None, (_.group('result').strip() for _ in re.finditer(TEXT_TAG_REGEX, page)))
 
 def trimAlphaNum(value):
@@ -2566,7 +2581,7 @@ def findDynamicContent(firstPage, secondPage):
             prefix = trimAlphaNum(prefix)
             suffix = trimAlphaNum(suffix)
 
-            kb.dynamicMarkings.append((re.escape(prefix[-DYNAMICITY_MARK_LENGTH / 2:]) if prefix else None, re.escape(suffix[:DYNAMICITY_MARK_LENGTH / 2]) if suffix else None))
+            kb.dynamicMarkings.append((prefix[-DYNAMICITY_MARK_LENGTH / 2:] if prefix else None, suffix[:DYNAMICITY_MARK_LENGTH / 2] if suffix else None))
 
     if len(kb.dynamicMarkings) > 0:
         infoMsg = "dynamic content marked for removal (%d region%s)" % (len(kb.dynamicMarkings), 's' if len(kb.dynamicMarkings) > 1 else '')
@@ -2927,7 +2942,7 @@ def unhandledExceptionMessage():
     errMsg += "sqlmap version: %s\n" % VERSION_STRING[VERSION_STRING.find('/') + 1:]
     errMsg += "Python version: %s\n" % PYVERSION
     errMsg += "Operating system: %s\n" % PLATFORM
-    errMsg += "Command line: %s\n" % re.sub(r".+?\bsqlmap.py\b", "sqlmap.py", " ".join(sys.argv))
+    errMsg += "Command line: %s\n" % re.sub(r".+?\bsqlmap.py\b", "sqlmap.py", getUnicode(" ".join(sys.argv), encoding=sys.stdin.encoding))
     errMsg += "Technique: %s\n" % (enumValueToNameLookup(PAYLOAD.TECHNIQUE, kb.technique) if kb.get("technique") else ("DIRECT" if conf.get("direct") else None))
     errMsg += "Back-end DBMS: %s" % ("%s (fingerprinted)" % Backend.getDbms() if Backend.getDbms() is not None else "%s (identified)" % Backend.getIdentifiedDbms())
 
@@ -2969,7 +2984,7 @@ def createGithubIssue(errMsg, excMsg):
 
 
         data = {"title": "Unhandled exception (#%s)" % key, "body": "```%s\n```\n```\n%s```" % (errMsg, excMsg)}
-        req = urllib2.Request(url="https://api.github.com/repos/sqlmapproject/sqlmap/issues", data=json.dumps(data), headers={"Authorization": "token %s" % GITHUB_REPORT_OAUTH_TOKEN})
+        req = urllib2.Request(url="https://api.github.com/repos/sqlmapproject/sqlmap/issues", data=json.dumps(data), headers={"Authorization": "token %s" % GITHUB_REPORT_OAUTH_TOKEN.decode("base64")})
 
         try:
             f = urllib2.urlopen(req)
@@ -3002,7 +3017,7 @@ def maskSensitiveData(msg):
 
     retVal = getUnicode(msg)
 
-    for item in filter(None, map(lambda x: conf.get(x), ("hostname", "googleDork", "authCred", "proxyCred", "tbl", "db", "col", "user", "cookie", "proxy"))):
+    for item in filter(None, map(lambda x: conf.get(x), ("hostname", "googleDork", "authCred", "proxyCred", "tbl", "db", "col", "user", "cookie", "proxy", "rFile", "wFile", "dFile"))):
         regex = SENSITIVE_DATA_REGEX % re.sub("(\W)", r"\\\1", getUnicode(item))
         while extractRegexResult(regex, retVal):
             value = extractRegexResult(regex, retVal)
@@ -3012,7 +3027,6 @@ def maskSensitiveData(msg):
         match = re.search(r"(?i)sqlmap.+(-u|--url)(\s+|=)([^ ]+)", retVal)
         if match:
             retVal = retVal.replace(match.group(3), '*' * len(match.group(3)))
-
 
     if getpass.getuser():
         retVal = re.sub(r"(?i)\b%s\b" % re.escape(getpass.getuser()), "*" * len(getpass.getuser()), retVal)
@@ -3276,7 +3290,7 @@ def expandMnemonics(mnemonics, parser, args):
                     pointer = pointer.next[char]
                     pointer.current.append(option)
 
-    for mnemonic in mnemonics.split(','):
+    for mnemonic in (mnemonics or "").split(','):
         found = None
         name = mnemonic.split('=')[0].replace("-", "").strip()
         value = mnemonic.split('=')[1] if len(mnemonic.split('=')) > 1 else None
@@ -3456,8 +3470,13 @@ def asciifyUrl(url, forceQuote=False):
             netloc = ':' + password + netloc
         netloc = username + netloc
 
-    if parts.port:
-        netloc += ':' + str(parts.port)
+    try:
+        port = parts.port
+    except:
+        port = None
+
+    if port:
+        netloc += ':' + str(port)
 
     return urlparse.urlunsplit([parts.scheme, netloc, path, query, parts.fragment])
 
@@ -3648,7 +3667,7 @@ def evaluateCode(code, variables=None):
     except KeyboardInterrupt:
         raise
     except Exception, ex:
-        errMsg = "an error occurred while evaluating provided code ('%s'). " % ex
+        errMsg = "an error occurred while evaluating provided code ('%s') " % ex.message
         raise SqlmapGenericException(errMsg)
 
 def serializeObject(object_):
@@ -3704,7 +3723,7 @@ def applyFunctionRecursively(value, function):
 
     return retVal
 
-def decodeHexValue(value):
+def decodeHexValue(value, raw=False):
     """
     Returns value decoded from DBMS specific hexadecimal representation
 
@@ -3719,7 +3738,7 @@ def decodeHexValue(value):
         if value and isinstance(value, basestring) and len(value) % 2 == 0:
             retVal = hexdecode(retVal)
 
-            if not kb.binaryField:
+            if not kb.binaryField and not raw:
                 if Backend.isDbms(DBMS.MSSQL) and value.startswith("0x"):
                     try:
                         retVal = retVal.decode("utf-16-le")
@@ -3817,7 +3836,7 @@ def resetCookieJar(cookieJar):
                 with open(filename, "w+b") as f:
                     f.write("%s\n" % NETSCAPE_FORMAT_HEADER_COOKIES)
                     for line in lines:
-                        _ = line.split()
+                        _ = line.split("\t")
                         if len(_) == 7:
                             _[4] = FORCE_COOKIE_EXPIRATION_TIME
                             f.write("\n%s" % "\t".join(_))
