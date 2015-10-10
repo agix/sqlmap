@@ -17,6 +17,7 @@ from optparse import SUPPRESS_HELP
 
 from lib.core.common import checkDeprecatedOptions
 from lib.core.common import checkSystemEncoding
+from lib.core.common import dataToStdout
 from lib.core.common import expandMnemonics
 from lib.core.common import getUnicode
 from lib.core.data import cmdLineOptions
@@ -30,20 +31,24 @@ from lib.core.settings import BASIC_HELP_ITEMS
 from lib.core.settings import DUMMY_URL
 from lib.core.settings import IS_WIN
 from lib.core.settings import MAX_HELP_OPTION_LENGTH
+from lib.core.settings import NNC5ED_LOGO
 from lib.core.settings import VERSION_STRING
 from lib.core.shell import autoCompletion
 from lib.core.shell import clearHistory
 from lib.core.shell import loadHistory
 from lib.core.shell import saveHistory
 
-def cmdLineParser():
+def cmdLineParser(argv=None):
     """
     This function parses the command line parameters and arguments
     """
 
+    if not argv:
+        argv = sys.argv
+
     checkSystemEncoding()
 
-    _ = getUnicode(os.path.basename(sys.argv[0]), encoding=sys.getfilesystemencoding())
+    _ = getUnicode(os.path.basename(argv[0]), encoding=sys.getfilesystemencoding())
 
     usage = "%s%s [options]" % ("python " if not IS_WIN else "", \
             "\"%s\"" % _ if " " in _ else _)
@@ -141,8 +146,8 @@ def cmdLineParser():
                            help="HTTP authentication credentials "
                                 "(name:password)")
 
-        request.add_option("--auth-private", dest="authPrivate",
-                           help="HTTP authentication PEM private key file")
+        request.add_option("--auth-file", dest="authFile",
+                           help="HTTP authentication PEM cert/private key file")
 
         request.add_option("--ignore-401", dest="ignore401", action="store_true",
                           help="Ignore HTTP Error 401 (Unauthorized)")
@@ -671,6 +676,9 @@ def cmdLineParser():
         general.add_option("--test-filter", dest="testFilter",
                            help="Select tests by payloads and/or titles (e.g. ROW)")
 
+        general.add_option("--test-skip", dest="testSkip",
+                           help="Skip tests by payloads and/or titles (e.g. BENCHMARK)")
+
         general.add_option("--update", dest="updateAll",
                             action="store_true",
                             help="Update sqlmap")
@@ -709,6 +717,10 @@ def cmdLineParser():
         miscellaneous.add_option("--identify-waf", dest="identifyWaf",
                                   action="store_true",
                                   help="Make a thorough testing for a WAF/IPS/IDS protection")
+
+        miscellaneous.add_option("--skip-waf", dest="skipWaf",
+                                  action="store_true",
+                                  help="Skip heuristic detection of WAF/IPS/IDS protection")
 
         miscellaneous.add_option("--mobile", dest="mobile",
                                   action="store_true",
@@ -756,6 +768,9 @@ def cmdLineParser():
         parser.add_option("--force-dns", dest="forceDns", action="store_true",
                           help=SUPPRESS_HELP)
 
+        parser.add_option("--force-threads", dest="forceThreads", action="store_true",
+                          help=SUPPRESS_HELP)
+
         parser.add_option("--smoke-test", dest="smokeTest", action="store_true",
                           help=SUPPRESS_HELP)
 
@@ -766,6 +781,9 @@ def cmdLineParser():
                           help=SUPPRESS_HELP)
 
         parser.add_option("--run-case", dest="runCase", help=SUPPRESS_HELP)
+
+        parser.add_option("--nnc5ed", dest="nnc5ed", action="store_true",
+                          help=SUPPRESS_HELP)  # temporary hidden switch :)
 
         parser.add_option_group(target)
         parser.add_option_group(request)
@@ -802,14 +820,15 @@ def cmdLineParser():
         option = parser.get_option("-h")
         option.help = option.help.capitalize().replace("this help", "basic help")
 
-        argv = []
+        _ = []
         prompt = False
         advancedHelp = True
         extraHeaders = []
 
-        for arg in sys.argv:
-            argv.append(getUnicode(arg, encoding=sys.getfilesystemencoding()))
+        for arg in argv:
+            _.append(getUnicode(arg, encoding=sys.getfilesystemencoding()))
 
+        argv = _
         checkDeprecatedOptions(argv)
 
         prompt = "--sqlmap-shell" in argv
@@ -910,6 +929,10 @@ def cmdLineParser():
         for i in xrange(len(argv) - 1):
             if argv[i] == "-z":
                 expandMnemonics(argv[i + 1], parser, args)
+
+        if args.nnc5ed:
+            dataToStdout(NNC5ED_LOGO)
+            raise SystemExit
 
         if args.dummy:
             args.url = args.url or DUMMY_URL
